@@ -1027,16 +1027,16 @@ class MonitorApp(QMainWindow):
         try:
             import winsound
             winsound.Beep(600, 200)
-        except:
-            pass
+        except Exception as e:
+            self.log(f"提示音失败: {e}")
 
     def beep_miss(self):
         """没命中提醒音（灰色）"""
         try:
             import winsound
             winsound.Beep(400, 300)  # 低沉的单音
-        except:
-            pass
+        except Exception as e:
+            self.log(f"提示音失败: {e}")
 
     def beep_warning(self):
         """抢妖警告音（红色）"""
@@ -1045,8 +1045,8 @@ class MonitorApp(QMainWindow):
             for _ in range(3):
                 winsound.Beep(1000, 150)
                 winsound.Beep(1200, 150)
-        except:
-            pass
+        except Exception as e:
+            self.log(f"提示音失败: {e}")
 
     def toggle_flash(self):
         """切换闪烁状态"""

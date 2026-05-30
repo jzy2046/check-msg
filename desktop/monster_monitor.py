@@ -470,6 +470,19 @@ class MonitorApp(QMainWindow):
             target_in_current = [loc for loc in self.target_locations if loc in current_group]
             missed_current = target_in_current and detected_location not in target_in_current
 
+            # ========== 智能调整检测频率 ==========
+            if target_in_next:
+                # 下一组有监控地点！加快检测频率（准备抢妖模式）
+                self.detect_timer.setInterval(500)  # 500ms 高频检测
+                self.log(f"⚡ 下一组有目标，加快检测(500ms)")
+            elif detected_location in self.target_locations:
+                # 当前刷到了监控地点，保持快速检测（抢妖确认）
+                self.detect_timer.setInterval(800)  # 800ms
+            else:
+                # 下一组没有监控地点，放慢检测频率（省资源模式）
+                self.detect_timer.setInterval(2000)  # 2000ms 低频检测
+            # =====================================
+
             if detected_location in self.target_locations:
                 # 当前刷到的是监控地点！红色抢妖警告（最高优先级）
                 prob = get_group_probability(self.current_group_index)
@@ -620,10 +633,7 @@ class MonitorApp(QMainWindow):
                 if current_hash == self.last_pixels_hash and not has_bottom_change:
                     # 整体无变化且底部也无变化，跳过OCR
                     self.idle_count += 1
-                    # 连续空闲超过8次，降低检测频率到1.5秒（不要太慢）
-                    if self.idle_count >= 8 and self.detect_timer.interval() < 1500:
-                        self.detect_timer.setInterval(1500)
-                        # self.log("无变化，降低检测频率")  # 减少日志噪音
+                    # 空闲时不再强制调整频率，由智能频率控制负责
                     return
 
                 # 更新底部哈希
@@ -632,9 +642,7 @@ class MonitorApp(QMainWindow):
             # 图像有变化，重置空闲计数
             self.last_pixels_hash = current_hash
             self.idle_count = 0
-            # 恢复正常检测频率（1秒，保证及时响应）
-            if self.detect_timer.interval() > 1000:
-                self.detect_timer.setInterval(1000)
+            # 不再强制恢复频率，由智能频率控制负责
 
             # 放大图像提高识别率 - 1.5倍足够
             img_large = img.resize((int(img.width*1.5), int(img.height*1.5)), Image.LANCZOS)

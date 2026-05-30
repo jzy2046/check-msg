@@ -130,8 +130,10 @@ class MonitorApp(QMainWindow):
         self.monitoring = False
         self.flash_state = False
         self.current_alert_type = None  # 当前提醒类型
-        self.last_screenshot_hash = None  # 上次截图的哈希值（用于检测变化）
+        self.last_pixels_hash = None  # 上次截图的像素哈希（用于检测变化）
         self.idle_count = 0  # 空闲计数（用于降低检测频率）
+        self.recent_texts = deque(maxlen=20)  # 最近识别的文字（用于快速刷屏时合并检测）
+        self.last_ocr_time = 0  # 上次OCR时间戳
 
         # 颜色过滤阈值（根据222.png分析得出的黄色文字范围）
         self.color_threshold = {
@@ -520,11 +522,14 @@ class MonitorApp(QMainWindow):
             self.select_btn.setEnabled(False)
             self.last_group_index = None  # 重置历史
             self.history.clear()
+            self.recent_texts.clear()  # 清空最近识别记录
+            self.last_pixels_hash = None  # 清空像素哈希
+            self.last_bottom_hash = None  # 清空底部区域哈希
             self.log("开始监控... (OCR自动检测)")
             self.status_label.setText("状态: 监控中")
-            # OCR检测定时器 - 优化：降低检测频率减少CPU占用
+            # OCR检测定时器 - 1秒检测一次，保证及时响应
             if (HAS_RAPIDOCR or HAS_TESSERACT) and HAS_MSS and self.monitor_region:
-                self.detect_timer.start(2000)  # 每2秒检测一次（原1秒太频繁）
+                self.detect_timer.start(1000)  # 每1秒检测一次
         else:
             self.monitoring = False
             self.start_btn.setText("开始监控")
@@ -535,8 +540,10 @@ class MonitorApp(QMainWindow):
             self.flash_timer.stop()
             self.alert_frame.setStyleSheet("background-color: #f0f0f0; border: 2px solid #ccc;")
             # 重置优化相关变量
-            self.last_screenshot_hash = None
+            self.last_pixels_hash = None
+            self.last_bottom_hash = None
             self.idle_count = 0
+            self.recent_texts.clear()
 
     def get_group_index(self, location):
         """获取地点所在的组索引（返回所有可能的组）"""
@@ -578,7 +585,7 @@ class MonitorApp(QMainWindow):
         return possible_groups[0]
 
     def detect_location(self):
-        """截图并OCR检测地点 - 优化：先检测像素变化再OCR"""
+        """截图并OCR检测地点 - 优化：更灵敏的变化检测，快速刷屏时完整检测"""
         if not self.monitor_region or not HAS_MSS:
             if not self.monitor_region:
                 self.log("错误: 请先框选聊天框区域")
@@ -596,28 +603,40 @@ class MonitorApp(QMainWindow):
                 screenshot = sct.grab({"left": x, "top": y, "width": w, "height": h})
                 img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
 
-            # 优化：先快速计算图像哈希检测变化
-            # 使用简单的像素采样，避免完整哈希计算
-            pixels_sample = np.array(img.resize((32, 32), Image.LANCZOS))
+            # 快速像素变化检测 - 使用更多采样点提高敏感度
+            # 采样64x64像素，比之前的32x32更灵敏
+            pixels_sample = np.array(img.resize((64, 64), Image.LANCZOS))
             current_hash = hash(pixels_sample.tobytes())
 
-            if current_hash == self.last_screenshot_hash:
-                # 图像没变化，跳过OCR（节省大量CPU）
-                self.idle_count += 1
-                # 连续空闲超过5次，降低检测频率到3秒
-                if self.idle_count >= 5 and self.detect_timer.interval() < 3000:
-                    self.detect_timer.setInterval(3000)
-                    self.log("无变化，降低检测频率")
-                return
+            # 计算与上次的像素差异比例（更精确的变化检测）
+            if self.last_pixels_hash is not None:
+                # 同时检测边缘区域的变化（新消息通常从底部出现）
+                bottom_region = pixels_sample[48:64, :]  # 底部1/4区域
+                bottom_hash = hash(bottom_region.tobytes())
+
+                # 如果底部区域有变化，立即进行OCR（提高响应速度）
+                has_bottom_change = (bottom_hash != getattr(self, 'last_bottom_hash', None))
+
+                if current_hash == self.last_pixels_hash and not has_bottom_change:
+                    # 整体无变化且底部也无变化，跳过OCR
+                    self.idle_count += 1
+                    # 连续空闲超过8次，降低检测频率到1.5秒（不要太慢）
+                    if self.idle_count >= 8 and self.detect_timer.interval() < 1500:
+                        self.detect_timer.setInterval(1500)
+                        # self.log("无变化，降低检测频率")  # 减少日志噪音
+                    return
+
+                # 更新底部哈希
+                self.last_bottom_hash = bottom_hash
 
             # 图像有变化，重置空闲计数
-            self.last_screenshot_hash = current_hash
+            self.last_pixels_hash = current_hash
             self.idle_count = 0
-            # 恢复正常检测频率
-            if self.detect_timer.interval() > 2000:
-                self.detect_timer.setInterval(2000)
+            # 恢复正常检测频率（1秒，保证及时响应）
+            if self.detect_timer.interval() > 1000:
+                self.detect_timer.setInterval(1000)
 
-            # 放大图像提高识别率 - 优化：仅放大1.5倍减少计算量
+            # 放大图像提高识别率 - 1.5倍足够
             img_large = img.resize((int(img.width*1.5), int(img.height*1.5)), Image.LANCZOS)
             pixels = np.array(img_large)
 
@@ -636,8 +655,7 @@ class MonitorApp(QMainWindow):
 
                 if result and result[0]:
                     # result[0] 是列表，每个元素是 [坐标, 文字, 置信度]
-                    # 坐标格式: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] (左上、右上、右下、左下)
-                    # 只取最下面那条文字（y坐标最大的，即屏幕最下方）
+                    # 收集所有识别到的文字（不只是最下面一行）
                     all_texts = []
                     for r in result[0]:
                         coords = r[0]  # 坐标
@@ -646,18 +664,52 @@ class MonitorApp(QMainWindow):
                         avg_y = sum([p[1] for p in coords]) / len(coords)
                         all_texts.append((avg_y, text))
 
-                    # 按y坐标排序，取最大的（最下面的）
+                    # 按y坐标排序，从下到上
                     all_texts.sort(key=lambda x: x[0], reverse=True)
-                    bottom_text = all_texts[0][1] if all_texts else ""
 
-                    # 只有文字内容变化时才打印日志
-                    if bottom_text != self.text_buffer:
-                        self.text_buffer = bottom_text
-                        self.log(f"识别(最新): {bottom_text[:50]}...")
+                    # 处理所有新识别到的文字（解决快速刷屏漏检问题）
+                    current_time = time.time()
+                    new_locations_found = []
 
-                    detected_location = self.extract_location(bottom_text)
-                    if detected_location and detected_location != self.last_detected_location:
+                    for avg_y, text in all_texts:
+                        # 跳过太短或已在最近记录中的文字
+                        if len(text) < 2:
+                            continue
+
+                        # 从文字中提取地点
+                        detected = self.extract_location(text)
+                        if detected:
+                            # 检查是否是新的地点（去重）
+                            # 使用时间窗口而非仅检查上一次，避免快速刷屏漏检
+                            is_new = True
+                            for recent_loc, recent_time in self.recent_texts:
+                                if recent_loc == detected and (current_time - recent_time) < 12:
+                                    is_new = False
+                                    break
+
+                            if is_new:
+                                new_locations_found.append((avg_y, detected, text))
+                                self.recent_texts.append((detected, current_time))
+
+                    # 处理找到的新地点（优先处理最下面的，即最新的消息）
+                    if new_locations_found:
+                        # 按y坐标排序，最下面的优先
+                        new_locations_found.sort(key=lambda x: x[0], reverse=True)
+                        _, detected_location, raw_text = new_locations_found[0]
+
+                        # 更新显示
+                        bottom_text = all_texts[0][1] if all_texts else ""
+                        if bottom_text != self.text_buffer:
+                            self.text_buffer = bottom_text
+                            self.log(f"识别(最新): {bottom_text[:50]}...")
+
                         self.process_detected_location(detected_location)
+                    else:
+                        # 没有新地点，但仍更新显示文字
+                        bottom_text = all_texts[0][1] if all_texts else ""
+                        if bottom_text != self.text_buffer:
+                            self.text_buffer = bottom_text
+                            self.log(f"识别(最新): {bottom_text[:50]}...")
                     return
 
             elif HAS_TESSERACT:
@@ -669,8 +721,16 @@ class MonitorApp(QMainWindow):
                     self.text_buffer = bottom_line
                     self.log(f"识别(最新): {bottom_line[:50]}...")
                 detected_location = self.extract_location(bottom_line)
-                if detected_location and detected_location != self.last_detected_location:
-                    self.process_detected_location(detected_location)
+                if detected_location:
+                    current_time = time.time()
+                    is_new = True
+                    for recent_loc, recent_time in self.recent_texts:
+                        if recent_loc == detected_location and (current_time - recent_time) < 12:
+                            is_new = False
+                            break
+                    if is_new:
+                        self.recent_texts.append((detected_location, current_time))
+                        self.process_detected_location(detected_location)
 
         except Exception as e:
             self.log(f"检测错误: {str(e)}")

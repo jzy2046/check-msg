@@ -178,6 +178,11 @@ class MonitorApp(QMainWindow):
         # 区域标记窗口
         self.region_marker = None
 
+        # ========== 快速响应优化 ==========
+        self.pixel_change_detected = False  # 像素变化标志
+        self.last_pixel_check_time = 0  # 上次像素检测时间
+        # ================================
+
         # 颜色过滤阈值（根据222.png分析得出的黄色文字范围）
         self.color_threshold = {
             'r_min': 200, 'r_max': 255,
@@ -194,9 +199,13 @@ class MonitorApp(QMainWindow):
 
         self.init_ui()
 
-        # OCR检测定时器
-        self.detect_timer = QTimer()
-        self.detect_timer.timeout.connect(self.detect_location)
+        # 高频像素检测定时器（轻量，200ms）
+        self.pixel_timer = QTimer()
+        self.pixel_timer.timeout.connect(self.check_pixel_change)
+
+        # OCR执行定时器（只在像素变化时触发）
+        self.ocr_timer = QTimer()
+        self.ocr_timer.timeout.connect(self.run_ocr)
 
         # 跑马灯动画定时器
         self.animation_timer = QTimer()
@@ -636,6 +645,7 @@ class MonitorApp(QMainWindow):
             self.recent_texts.clear()  # 清空最近识别记录
             self.last_pixels_hash = None  # 清空像素哈希
             self.last_bottom_hash = None  # 清空底部区域哈希
+            self.pixel_change_detected = False  # 重置像素变化标志
             # 重置统计变量
             self.total_refresh_count = 0
             self.total_cycle_count = 0
@@ -643,18 +653,20 @@ class MonitorApp(QMainWindow):
             self.recent_refresh_records.clear()
             self.recent_cycle_records.clear()
             self.update_stats_display()
-            self.log("开始监控... (OCR自动检测)")
+            self.log("开始监控... (快速响应模式)")
             self.status_label.setText("状态: 监控中")
-            # OCR检测定时器 - 1秒检测一次，保证及时响应
+            # 双定时器策略：高频像素检测 + 按需OCR
             if (HAS_RAPIDOCR or HAS_TESSERACT) and HAS_MSS and self.monitor_region:
-                self.detect_timer.start(1000)  # 每1秒检测一次
+                self.pixel_timer.start(200)  # 200ms高频像素检测（轻量）
+                self.ocr_timer.start(500)    # 500ms OCR检查（按需执行）
         else:
             self.monitoring = False
             self.start_btn.setText("开始监控")
             self.select_btn.setEnabled(True)
             self.log("已停止监控")
             self.status_label.setText("状态: 已停止")
-            self.detect_timer.stop()
+            self.pixel_timer.stop()
+            self.ocr_timer.stop()
             self.flash_timer.stop()
             self.alert_frame.setStyleSheet("background-color: #f0f0f0; border: 2px solid #ccc;")
             # 重置优化相关变量
@@ -740,17 +752,9 @@ class MonitorApp(QMainWindow):
         # 没有历史记录时，返回第一个可能的组
         return possible_groups[0]
 
-    def detect_location(self):
-        """截图并OCR检测地点 - 优化：更灵敏的变化检测，快速刷屏时完整检测"""
+    def check_pixel_change(self):
+        """高频像素变化检测（200ms，轻量操作）"""
         if not self.monitor_region or not HAS_MSS:
-            if not self.monitor_region:
-                self.log("错误: 请先框选聊天框区域")
-            self.detect_timer.stop()
-            return
-
-        if not HAS_RAPIDOCR and not HAS_TESSERACT:
-            self.log("错误: 未安装OCR引擎")
-            self.detect_timer.stop()
             return
 
         try:
@@ -759,33 +763,55 @@ class MonitorApp(QMainWindow):
                 screenshot = sct.grab({"left": x, "top": y, "width": w, "height": h})
                 img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
 
-            # 快速像素变化检测 - 使用更多采样点提高敏感度
-            # 采样64x64像素，比之前的32x32更灵敏
-            pixels_sample = np.array(img.resize((64, 64), Image.LANCZOS))
+            # 只做简单的像素哈希检测（不放大、不OCR，非常轻量）
+            pixels_sample = np.array(img.resize((32, 32), Image.LANCZOS))
             current_hash = hash(pixels_sample.tobytes())
 
-            # 计算与上次的像素差异比例（更精确的变化检测）
-            if self.last_pixels_hash is not None:
-                # 同时检测边缘区域的变化（新消息通常从底部出现）
-                bottom_region = pixels_sample[48:64, :]  # 底部1/4区域
-                bottom_hash = hash(bottom_region.tobytes())
+            # 底部区域检测（新消息优先检测）
+            bottom_region = pixels_sample[24:32, :]
+            bottom_hash = hash(bottom_region.tobytes())
 
-                # 如果底部区域有变化，立即进行OCR（提高响应速度）
-                has_bottom_change = (bottom_hash != getattr(self, 'last_bottom_hash', None))
+            # 检测变化
+            has_change = (current_hash != self.last_pixels_hash) or \
+                         (bottom_hash != getattr(self, 'last_bottom_hash', None))
 
-                if current_hash == self.last_pixels_hash and not has_bottom_change:
-                    # 整体无变化且底部也无变化，跳过OCR
-                    self.idle_count += 1
-                    # 空闲时不再强制调整频率，由智能频率控制负责
-                    return
-
-                # 更新底部哈希
+            if has_change:
+                # 标记像素变化，触发OCR
+                self.pixel_change_detected = True
+                self.last_pixels_hash = current_hash
                 self.last_bottom_hash = bottom_hash
+                self.idle_count = 0
+            else:
+                self.idle_count += 1
 
-            # 图像有变化，重置空闲计数
-            self.last_pixels_hash = current_hash
-            self.idle_count = 0
-            # 不再强制恢复频率，由智能频率控制负责
+        except Exception as e:
+            pass  # 静默处理，避免高频日志
+
+    def run_ocr(self):
+        """OCR识别（500ms检查，只在像素变化时执行）"""
+        if not self.monitor_region or not HAS_MSS:
+            if not self.monitor_region:
+                self.log("错误: 请先框选聊天框区域")
+            self.ocr_timer.stop()
+            return
+
+        if not HAS_RAPIDOCR and not HAS_TESSERACT:
+            self.log("错误: 未安装OCR引擎")
+            self.ocr_timer.stop()
+            return
+
+        # 没有像素变化时跳过OCR（节省CPU）
+        if not self.pixel_change_detected:
+            return
+
+        # 重置标志
+        self.pixel_change_detected = False
+
+        try:
+            x, y, w, h = self.monitor_region
+            with mss.mss() as sct:
+                screenshot = sct.grab({"left": x, "top": y, "width": w, "height": h})
+                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
 
             # 放大图像提高识别率 - 1.5倍足够
             img_large = img.resize((int(img.width*1.5), int(img.height*1.5)), Image.LANCZOS)

@@ -580,14 +580,14 @@ class MonitorApp(QMainWindow):
             # ========== 智能调整检测频率 ==========
             if target_in_next:
                 # 下一组有监控地点！加快检测频率（准备抢妖模式）
-                self.detect_timer.setInterval(500)  # 500ms 高频检测
-                self.log(f"⚡ 下一组有目标，加快检测(500ms)")
+                self.ocr_timer.setInterval(300)  # 300ms 高频OCR检测
+                self.log(f"⚡ 下一组有目标，加快检测(300ms)")
             elif detected_location in self.target_locations:
                 # 当前刷到了监控地点，保持快速检测（抢妖确认）
-                self.detect_timer.setInterval(800)  # 800ms
+                self.ocr_timer.setInterval(500)  # 500ms
             else:
                 # 下一组没有监控地点，放慢检测频率（省资源模式）
-                self.detect_timer.setInterval(2000)  # 2000ms 低频检测
+                self.ocr_timer.setInterval(1000)  # 1000ms 低频检测
             # =====================================
 
             if detected_location in self.target_locations:

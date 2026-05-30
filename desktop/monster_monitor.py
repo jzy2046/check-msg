@@ -446,39 +446,35 @@ class MonitorApp(QMainWindow):
             self.region_label.setStyleSheet("color: #00ff00;")
             self.show_region_btn.setEnabled(True)  # 启用显示按钮
             self.log(f"已选择监控区域: ({x}, {y}) {w}x{h}")
-            # 自动显示区域标记
-            self.toggle_region_marker(show=True)
+            # 自动显示区域标记（强制显示）
+            if self.region_marker:
+                self.region_marker.close()
+            self.region_marker = RegionMarker(x, y, w, h)
+            self.show_region_btn.setText("隐藏")
         else:
             self.log("区域选择无效，请重新选择")
 
-    def toggle_region_marker(self, show=None):
+    def toggle_region_marker(self, _checked=False):
         """显示/隐藏区域标记"""
         if not self.monitor_region:
             return
 
         x, y, w, h = self.monitor_region
 
-        if show is None:
-            # 切换状态
-            if self.region_marker and self.region_marker.isVisible():
-                show = False
-            else:
-                show = True
-
-        if show:
-            # 显示区域标记
+        # 切换状态
+        if self.region_marker and self.region_marker.isVisible():
+            # 当前显示，要隐藏
+            self.region_marker.close()
+            self.region_marker = None
+            self.show_region_btn.setText("显示")
+            self.log("隐藏监控区域标记")
+        else:
+            # 当前隐藏，要显示
             if self.region_marker:
                 self.region_marker.close()
             self.region_marker = RegionMarker(x, y, w, h)
             self.show_region_btn.setText("隐藏")
             self.log("显示监控区域标记")
-        else:
-            # 隐藏区域标记
-            if self.region_marker:
-                self.region_marker.close()
-                self.region_marker = None
-            self.show_region_btn.setText("显示")
-            self.log("隐藏监控区域标记")
 
     def add_target_location(self):
         """添加监控地点"""

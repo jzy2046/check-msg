@@ -115,6 +115,38 @@ class RegionSelector(QWidget):
             painter.drawRect(rect)
 
 
+class RegionMarker(QWidget):
+    """区域标记器 - 半透明边框窗口显示选中的监控区域"""
+
+    def __init__(self, x, y, w, h):
+        super().__init__()
+        self.setGeometry(x, y, w, h)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowTitle("监控区域")
+        self.show()
+
+    def paintEvent(self, event):
+        from PyQt5.QtGui import QPainter, QPen, QFont
+        painter = QPainter(self)
+        # 半透明绿色填充
+        painter.fillRect(self.rect(), QColor(0, 255, 0, 50))
+        # 红色边框
+        pen = QPen(QColor(255, 0, 0), 3)
+        painter.setPen(pen)
+        painter.drawRect(self.rect())
+        # 显示区域信息
+        painter.setPen(QColor(255, 255, 255))
+        font = QFont("Microsoft YaHei", 10)
+        painter.setFont(font)
+        info = f"监控区域 {self.width()}x{self.height()}"
+        painter.drawText(5, 15, info)
+
+    def mouseDoubleClickEvent(self, event):
+        """双击关闭"""
+        self.close()
+
+
 class MonitorApp(QMainWindow):
     """主监控窗口"""
 
@@ -142,6 +174,9 @@ class MonitorApp(QMainWindow):
         self.recent_refresh_records = deque(maxlen=600)  # 最近10分钟刷新记录（时间戳）
         self.recent_cycle_records = deque(maxlen=100)  # 最近10分钟循环记录（时间戳）
         # ===============================
+
+        # 区域标记窗口
+        self.region_marker = None
 
         # 颜色过滤阈值（根据222.png分析得出的黄色文字范围）
         self.color_threshold = {
@@ -283,8 +318,13 @@ class MonitorApp(QMainWindow):
         self.select_btn = QPushButton("框选")
         self.select_btn.setFixedWidth(50)
         self.select_btn.clicked.connect(self.select_region)
+        self.show_region_btn = QPushButton("显示")
+        self.show_region_btn.setFixedWidth(50)
+        self.show_region_btn.clicked.connect(self.toggle_region_marker)
+        self.show_region_btn.setEnabled(False)  # 选择区域后才能点击
         setup_layout.addWidget(self.region_label)
         setup_layout.addWidget(self.select_btn)
+        setup_layout.addWidget(self.show_region_btn)
         top_row.addWidget(setup_group)
 
         # 监控地点
@@ -404,9 +444,41 @@ class MonitorApp(QMainWindow):
             self.monitor_region = (x, y, w, h)
             self.region_label.setText(f"区域: ({x}, {y}) {w}x{h}")
             self.region_label.setStyleSheet("color: #00ff00;")
+            self.show_region_btn.setEnabled(True)  # 启用显示按钮
             self.log(f"已选择监控区域: ({x}, {y}) {w}x{h}")
+            # 自动显示区域标记
+            self.toggle_region_marker(show=True)
         else:
             self.log("区域选择无效，请重新选择")
+
+    def toggle_region_marker(self, show=None):
+        """显示/隐藏区域标记"""
+        if not self.monitor_region:
+            return
+
+        x, y, w, h = self.monitor_region
+
+        if show is None:
+            # 切换状态
+            if self.region_marker and self.region_marker.isVisible():
+                show = False
+            else:
+                show = True
+
+        if show:
+            # 显示区域标记
+            if self.region_marker:
+                self.region_marker.close()
+            self.region_marker = RegionMarker(x, y, w, h)
+            self.show_region_btn.setText("隐藏")
+            self.log("显示监控区域标记")
+        else:
+            # 隐藏区域标记
+            if self.region_marker:
+                self.region_marker.close()
+                self.region_marker = None
+            self.show_region_btn.setText("显示")
+            self.log("隐藏监控区域标记")
 
     def add_target_location(self):
         """添加监控地点"""

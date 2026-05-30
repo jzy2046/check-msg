@@ -136,11 +136,11 @@ class MonitorApp(QMainWindow):
         self.last_ocr_time = 0  # 上次OCR时间戳
 
         # ========== 循环统计 ==========
-        self.total_detect_count = 0  # 总检测次数
-        self.total_ocr_count = 0  # 总OCR执行次数
+        self.total_refresh_count = 0  # 总刷新次数（地点刷新）
+        self.total_cycle_count = 0  # 总循环次数（每4组为1循环）
         self.monitor_start_time = None  # 监控开始时间
-        self.recent_detect_records = deque(maxlen=600)  # 最近10分钟检测记录（时间戳）
-        self.recent_ocr_records = deque(maxlen=600)  # 最近10分钟OCR记录（时间戳）
+        self.recent_refresh_records = deque(maxlen=600)  # 最近10分钟刷新记录（时间戳）
+        self.recent_cycle_records = deque(maxlen=100)  # 最近10分钟循环记录（时间戳）
         # ===============================
 
         # 颜色过滤阈值（根据222.png分析得出的黄色文字范围）
@@ -361,11 +361,11 @@ class MonitorApp(QMainWindow):
 
         # 统计行 - 显示循环次数
         stats_row = QHBoxLayout()
-        self.stats_total_label = QLabel("总计: 检测0次 OCR0次 运行0秒")
+        self.stats_total_label = QLabel("总计: 刷新0次 循环0轮 运行0秒")
         self.stats_total_label.setStyleSheet("color: #0066cc; font-size: 12px;")
         stats_row.addWidget(self.stats_total_label)
 
-        self.stats_recent_label = QLabel("近10分钟: 检测0次 OCR0次")
+        self.stats_recent_label = QLabel("近10分钟: 刷新0次 循环0轮")
         self.stats_recent_label.setStyleSheet("color: #009900; font-size: 12px;")
         stats_row.addWidget(self.stats_recent_label)
         layout.addLayout(stats_row)
@@ -458,6 +458,17 @@ class MonitorApp(QMainWindow):
         self.current_group_index = self.smart_detect_group(detected_location)
 
         if self.current_group_index is not None:
+            # ========== 更新循环统计 ==========
+            self.total_refresh_count += 1
+            self.recent_refresh_records.append(current_time)
+            # 检测循环完成：从第4组回到第1组时，循环+1
+            if self.last_group_index == 3 and self.current_group_index == 0:
+                self.total_cycle_count += 1
+                self.recent_cycle_records.append(current_time)
+                self.log(f"📊 完成一个循环！当前第{self.total_cycle_count}轮")
+            self.update_stats_display()
+            # ================================
+
             # 更新跑马灯高亮
             self.set_highlight_group(self.current_group_index)
 
@@ -558,11 +569,11 @@ class MonitorApp(QMainWindow):
             self.last_pixels_hash = None  # 清空像素哈希
             self.last_bottom_hash = None  # 清空底部区域哈希
             # 重置统计变量
-            self.total_detect_count = 0
-            self.total_ocr_count = 0
+            self.total_refresh_count = 0
+            self.total_cycle_count = 0
             self.monitor_start_time = time.time()
-            self.recent_detect_records.clear()
-            self.recent_ocr_records.clear()
+            self.recent_refresh_records.clear()
+            self.recent_cycle_records.clear()
             self.update_stats_display()
             self.log("开始监控... (OCR自动检测)")
             self.status_label.setText("状态: 监控中")
@@ -605,22 +616,22 @@ class MonitorApp(QMainWindow):
         else:
             run_time_str = "0秒"
 
-        # 计算最近10分钟的检测次数（600秒）
+        # 计算最近10分钟的刷新次数和循环次数（600秒）
         ten_minutes_ago = current_time - 600
-        recent_detect = sum(1 for t in self.recent_detect_records if t > ten_minutes_ago)
-        recent_ocr = sum(1 for t in self.recent_ocr_records if t > ten_minutes_ago)
+        recent_refresh = sum(1 for t in self.recent_refresh_records if t > ten_minutes_ago)
+        recent_cycle = sum(1 for t in self.recent_cycle_records if t > ten_minutes_ago)
 
         # 更新显示
         self.stats_total_label.setText(
-            f"总计: 检测{self.total_detect_count}次 OCR{self.total_ocr_count}次 运行{run_time_str}"
+            f"总计: 刷新{self.total_refresh_count}次 循环{self.total_cycle_count}轮 运行{run_time_str}"
         )
-        self.stats_recent_label.setText(f"近10分钟: 检测{recent_detect}次 OCR{recent_ocr}次")
+        self.stats_recent_label.setText(f"近10分钟: 刷新{recent_refresh}次 循环{recent_cycle}轮")
 
         # 清理超过10分钟的旧记录（保持队列清洁）
-        while self.recent_detect_records and self.recent_detect_records[0] < ten_minutes_ago:
-            self.recent_detect_records.popleft()
-        while self.recent_ocr_records and self.recent_ocr_records[0] < ten_minutes_ago:
-            self.recent_ocr_records.popleft()
+        while self.recent_refresh_records and self.recent_refresh_records[0] < ten_minutes_ago:
+            self.recent_refresh_records.popleft()
+        while self.recent_cycle_records and self.recent_cycle_records[0] < ten_minutes_ago:
+            self.recent_cycle_records.popleft()
 
     def get_group_index(self, location):
         """获取地点所在的组索引（返回所有可能的组）"""
@@ -674,11 +685,6 @@ class MonitorApp(QMainWindow):
             self.detect_timer.stop()
             return
 
-        # 记录检测次数
-        current_time = time.time()
-        self.total_detect_count += 1
-        self.recent_detect_records.append(current_time)
-
         try:
             x, y, w, h = self.monitor_region
             with mss.mss() as sct:
@@ -703,7 +709,6 @@ class MonitorApp(QMainWindow):
                     # 整体无变化且底部也无变化，跳过OCR
                     self.idle_count += 1
                     # 空闲时不再强制调整频率，由智能频率控制负责
-                    self.update_stats_display()  # 更新统计显示
                     return
 
                 # 更新底部哈希
@@ -713,10 +718,6 @@ class MonitorApp(QMainWindow):
             self.last_pixels_hash = current_hash
             self.idle_count = 0
             # 不再强制恢复频率，由智能频率控制负责
-
-            # 记录OCR执行次数（只有变化时才执行OCR）
-            self.total_ocr_count += 1
-            self.recent_ocr_records.append(current_time)
 
             # 放大图像提高识别率 - 1.5倍足够
             img_large = img.resize((int(img.width*1.5), int(img.height*1.5)), Image.LANCZOS)
@@ -816,9 +817,6 @@ class MonitorApp(QMainWindow):
 
         except Exception as e:
             self.log(f"检测错误: {str(e)}")
-
-        # 更新统计显示
-        self.update_stats_display()
 
     def extract_location(self, text):
         """从文本中提取地点名称 - 基于2字组合匹配"""
